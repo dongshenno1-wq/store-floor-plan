@@ -145,15 +145,20 @@ function validPolygon(points){
     });
   });
 }
+function fixtureExtents(f){
+  const angle=f.rotation*Math.PI/180;
+  const cos=Math.abs(Math.cos(angle)), sin=Math.abs(Math.sin(angle));
+  return {x:(f.width*cos+f.depth*sin)/2,y:(f.width*sin+f.depth*cos)/2};
+}
+function fixtureBounds(f){
+  const {x,y}=fixtureExtents(f);
+  return {left:f.x-x,right:f.x+x,top:f.y-y,bottom:f.y+y};
+}
+function boxCorners(box){
+  return [{x:box.left,y:box.top},{x:box.right,y:box.bottom}];
+}
 function contentBounds(p){
-  const points = [...p.points];
-  for (const f of p.fixtures) {
-    const angle=f.rotation*Math.PI/180;
-    const dx=(Math.abs(f.width*Math.cos(angle))+Math.abs(f.depth*Math.sin(angle)))/2;
-    const dy=(Math.abs(f.width*Math.sin(angle))+Math.abs(f.depth*Math.cos(angle)))/2;
-    points.push({x:f.x-dx,y:f.y-dy},{x:f.x+dx,y:f.y+dy});
-  }
-  return bounds(points);
+  return bounds([...p.points,...p.fixtures.flatMap(f=>boxCorners(fixtureBounds(f)))]);
 }
 function fitView(){
   const b = draw ? bounds([...rectangle(draw.width,draw.length),...draw.points]) : contentBounds(plan());
@@ -167,8 +172,113 @@ function fitView(){
 function world(point){
   return {x:camera.x+point.x/camera.scale,y:camera.y+point.y/camera.scale};
 }
-function snap(value){
-  return plan().snap ? Math.round(value/plan().step)*plan().step : round(value);
+const snapAxes=['x','y'];
+const crossAxis={x:'y',y:'x'};
+const snapEpsilon=1e-7;
+let snapGuides={};
+
+function intervalGap(a,b,c,d){
+  return Math.max(0,c-b,a-d);
+}
+function closerSnap(best,candidate){
+  if (!best) return candidate;
+  const difference=candidate.distance-best.distance;
+  if (difference < -snapEpsilon ||
+      (Math.abs(difference)<=snapEpsilon && candidate.gap<best.gap)) return candidate;
+  return best;
+}
+function snapPosition(raw,fixture,vertices){
+  const p=plan(), result={x:round(raw.x),y:round(raw.y)};
+  if (!p.snap) return {position:result,guides:{}};
+
+  const threshold=Math.min(150,Math.max(8,12/camera.scale));
+  const extents=fixture ? fixtureExtents(fixture) : {x:0,y:0};
+  const offsets=axis=>fixture ? [-extents[axis],extents[axis],0] : [0];
+  const matches={};
+  const candidate=(axis,offset,target,gap=0)=>{
+    const value=target-offset;
+    return {value,target,gap,distance:Math.abs(value-raw[axis])};
+  };
+  const offer=(axis,offset,target,gap=0)=>{
+    const match=candidate(axis,offset,target,gap);
+    if (match.distance<=threshold) matches[axis]=closerSnap(matches[axis],match);
+  };
+  const gapTo=(axis,min,max)=>intervalGap(raw[axis]-extents[axis],raw[axis]+extents[axis],min,max);
+  let diagonal;
+  if (fixture) {
+    for (const other of p.fixtures) {
+      if (other===fixture) continue;
+      const size=fixtureExtents(other);
+      for (const axis of snapAxes) {
+        const cross=crossAxis[axis];
+        const gap=gapTo(cross,other[cross]-size[cross],other[cross]+size[cross]);
+        offer(axis,0,other[axis],gap);
+        for (const offset of [-extents[axis],extents[axis]]) {
+          offer(axis,offset,other[axis]-size[axis],gap);
+          offer(axis,offset,other[axis]+size[axis],gap);
+        }
+      }
+    }
+    p.points.forEach((a,i)=>{
+      const b=p.points[(i+1)%p.points.length];
+      if (a.x===b.x || a.y===b.y) {
+        const axis=a.x===b.x?'x':'y', cross=crossAxis[axis];
+        const gap=gapTo(cross,Math.min(a[cross],b[cross]),Math.max(a[cross],b[cross]));
+        if (gap<=threshold) {
+          for (const offset of [-extents[axis],extents[axis]]) offer(axis,offset,a[axis],gap);
+        }
+        return;
+      }
+      const dx=b.x-a.x,dy=b.y-a.y;
+      for (const ox of [-extents.x,extents.x]) {
+        for (const oy of [-extents.y,extents.y]) {
+          const fraction=((raw.x+ox-a.x)*dx+(raw.y+oy-a.y)*dy)/(dx*dx+dy*dy);
+          const t=Math.max(0,Math.min(1,fraction));
+          const x=candidate('x',ox,a.x+t*dx),y=candidate('y',oy,a.y+t*dy);
+          const distance=Math.hypot(x.distance,y.distance);
+          if (x.distance<=threshold && y.distance<=threshold &&
+              (!diagonal || distance<diagonal.distance-snapEpsilon)) {
+            diagonal={x,y,distance};
+          }
+        }
+      }
+    });
+  } else {
+    for (const vertex of vertices) {
+      for (const axis of snapAxes) {
+        const cross=crossAxis[axis];
+        offer(axis,0,vertex[axis],Math.abs(raw[cross]-vertex[cross]));
+      }
+    }
+  }
+  // A diagonal wall needs both coordinates to put the corner on the segment.
+  if (diagonal && snapAxes.every(axis=>closerSnap(matches[axis],diagonal[axis])===diagonal[axis])) {
+    Object.assign(matches,{x:diagonal.x,y:diagonal.y});
+  }
+  const guides={};
+  for (const axis of snapAxes) {
+    if (!matches[axis]) {
+      for (const offset of offsets(axis)) {
+        const target=Math.round((raw[axis]+offset)/p.step)*p.step;
+        offer(axis,offset,target);
+      }
+    }
+    if (matches[axis]) {
+      result[axis]=matches[axis].value;
+      guides[axis]=matches[axis].target;
+    }
+  }
+  return {position:result,guides};
+}
+function guideMarkup(u){
+  if (!plan().snap || !Object.keys(snapGuides).length) return '';
+  const b=bounds(draw ? [...rectangle(draw.width,draw.length),...draw.points] : plan().points);
+  const pad=14*u;
+  const {x,y}=snapGuides;
+  const path=(x===undefined?'':'M'+x+' '+(b.top-pad)+'V'+(b.bottom+pad))+
+    (y===undefined?'':'M'+(b.left-pad)+' '+y+'H'+(b.right+pad));
+  return '<g class="snap-guide" data-testid="snap-guide" data-guide="true" aria-hidden="true">'+
+    '<path class="snap-guide-halo" d="'+path+'"/><path d="'+path+'"/></g>';
 }
 function zoomAt(point,factor){
   const anchor = world(point);
@@ -267,7 +377,7 @@ function render(){
   } else {
     scene += planMarkup(plan(),u);
   }
-  svg.innerHTML = scene+scaleMark(camera.x+15*u,camera.y+h-19*u,u);
+  svg.innerHTML = scene+guideMarkup(u)+scaleMark(camera.x+15*u,camera.y+h-19*u,u);
   $('selection-bar').hidden = !!draw || !selectedFixture();
   $('draw-bar').hidden = !draw;
   $('zoom-value').textContent = Math.round(camera.scale/camera.base*100)+'%';
@@ -505,15 +615,45 @@ function groupEditor(type){
     dialog.close();
   };
 }
+function offsetToFreeSpot(entries){
+  const p=plan(), venue=bounds(p.points);
+  const box=bounds(entries.flatMap(f=>boxCorners(fixtureBounds(f))));
+  const occupied=p.fixtures.map(fixtureBounds);
+  const free=(x,y)=>occupied.every(other=>
+    box.right+x<=other.left+snapEpsilon || box.left+x>=other.right-snapEpsilon ||
+    box.bottom+y<=other.top+snapEpsilon || box.top+y>=other.bottom-snapEpsilon);
+  if (free(0,0)) return;
+  const inside=(x,y)=>box.left+x>=venue.left && box.right+x<=venue.right &&
+    box.top+y>=venue.top && box.bottom+y<=venue.bottom;
+  const step=Math.max(150,Math.ceil(Math.max(box.right-box.left,box.bottom-box.top)/16));
+  let fallback;
+  function move(x,y){
+    entries.forEach(f=>{f.x+=x;f.y+=y;});
+  }
+  for (let ring=1;ring<=20;ring++) {
+    for (let i=-ring;i<=ring;i++) {
+      for (const [x,y] of [[ring,i],[i,ring],[-ring,-i],[-i,-ring]]) {
+        const dx=x*step,dy=y*step;
+        if (!free(dx,dy)) continue;
+        if (inside(dx,dy)) return move(dx,dy);
+        fallback ??= [dx,dy];
+      }
+    }
+  }
+  if (fallback) return move(...fallback);
+  const right=occupied.reduce((max,other)=>Math.max(max,other.right),box.left);
+  move(right-box.left+50,0);
+}
 function place(id){
   if (draw) return toast('请先完成或取消当前绘制');
   const center=world({x:svg.clientWidth/2,y:svg.clientHeight/2});
-  const x=snap(center.x),y=snap(center.y);
+  const {x,y}=snapPosition(center,null,[]).position;
   const type=state.library.find(entry=>entry.id===id);
   if (!type) return;
   const entries=type.members
     ? type.members.map(member=>fixture(member,x+member.offsetX,y+member.offsetY))
     : [fixture(type,x,y)];
+  offsetToFreeSpot(entries);
   change(()=>{
     plan().fixtures.push(...entries);
     selection=entries[0].id;
@@ -574,6 +714,8 @@ function pair(){
 function startPinch(){
   const {mid,distance}=pair();
   gesture={kind:'pinch',anchor:world(mid),distance,scale:camera.scale};
+  snapGuides={};
+  render();
 }
 svg.addEventListener('pointerdown',event=>{
   if (event.button!==0 || pointers.size>=2) return;
@@ -607,22 +749,39 @@ svg.addEventListener('pointermove',event=>{
   const point=localPoint(event);
   const pos=world(point);
   $('coordinate').textContent='X '+Math.round(pos.x)+' · Y '+Math.round(pos.y)+' mm';
-  if (!pointers.has(event.pointerId)) return;
+  if (!pointers.has(event.pointerId)) {
+    if (draw && !pointers.size) {
+      snapGuides=snapPosition(pos,null,draw.points).guides;
+      render();
+    }
+    return;
+  }
   pointers.set(event.pointerId,point);
   if (pointers.size===2) {
     const {mid,distance}=pair();
     setZoom(gesture.anchor,mid,gesture.scale*distance/gesture.distance);
   } else {
     const g=gesture;
-    if (!g.moved && Math.hypot(point.x-g.point.x,point.y-g.point.y)<4) return;
+    if (!g.moved && Math.hypot(point.x-g.point.x,point.y-g.point.y)<4) {
+      if (g.kind==='draw') {
+        snapGuides=snapPosition(pos,null,draw.points).guides;
+        render();
+      }
+      return;
+    }
     g.moved=true;
     if (g.kind==='move') {
-      const x=snap(g.origin.x+pos.x-g.start.x), y=snap(g.origin.y+pos.y-g.start.y);
-      if (x===g.node.x && y===g.node.y) return;
-      if (!gestureBefore) gestureBefore=clone(state);
-      Object.assign(g.node,{x,y});
-      edited=true;
+      const raw={x:g.origin.x+pos.x-g.start.x,y:g.origin.y+pos.y-g.start.y};
+      const vertices=g.item ? [] : plan().points.filter(vertex=>vertex!==g.node);
+      const {position,guides}=snapPosition(raw,g.item?g.node:null,vertices);
+      snapGuides=guides;
+      if (position.x!==g.node.x || position.y!==g.node.y) {
+        if (!gestureBefore) gestureBefore=clone(state);
+        Object.assign(g.node,position);
+        edited=true;
+      }
     } else {
+      snapGuides={};
       camera.x=g.origin.x-(point.x-g.point.x)/camera.scale;
       camera.y=g.origin.y-(point.y-g.point.y)/camera.scale;
     }
@@ -632,15 +791,18 @@ svg.addEventListener('pointermove',event=>{
 function closeDraw(){
   if (!draw || !validPolygon(draw.points)) return toast('至少需要 3 个顶点，边线不能交叉');
   const {name,points}=draw;
+  snapGuides={};
   draw=null;
   addPlan(name,points,'polygon');
 }
 function endPointer(event){
   if (!pointers.has(event.pointerId)) return;
   pointers.delete(event.pointerId);
+  snapGuides={};
   if (pointers.size) {
     const [point]=pointers.values();
     gesture={kind:'pan',point,origin:{x:camera.x,y:camera.y},moved:true};
+    render();
     return;
   }
   const g=gesture;
@@ -660,18 +822,28 @@ function endPointer(event){
     refresh();
   } else if (!g.moved && event.type==='pointerup') {
     if (draw) {
-      if (g.first && draw.points.length>=3) return closeDraw();
-      if (draw.points.length>=500) return toast('最多可添加 500 个顶点');
-      const point={x:snap(g.start.x),y:snap(g.start.y)};
-      if (!draw.points.some(p=>p.x===point.x && p.y===point.y)) draw.points.push(point);
+      if (g.first && draw.points.length>=3) {
+        closeDraw();
+      } else if (draw.points.length>=500) {
+        toast('最多可添加 500 个顶点');
+      } else {
+        const point=snapPosition(g.start,null,draw.points).position;
+        if (!draw.points.some(p=>p.x===point.x && p.y===point.y)) draw.points.push(point);
+      }
     } else if (g.kind==='pan') {
       selection=g.venue?'venue':null;
       properties();
     }
-    render();
   }
+  render();
 }
 ['pointerup','pointercancel','lostpointercapture'].forEach(type=>svg.addEventListener(type,endPointer));
+svg.addEventListener('pointerleave',()=>{
+  if (draw && !pointers.size && Object.keys(snapGuides).length) {
+    snapGuides={};
+    render();
+  }
+});
 svg.addEventListener('wheel',event=>{
   event.preventDefault();
   if (!pointers.size) zoomAt(localPoint(event),Math.exp(-Math.max(-130,Math.min(130,event.deltaY))*.0025));
@@ -892,8 +1064,8 @@ $('selection-bar').onclick=event=>{
     $('placed-name').focus();
   } else if (action==='rotate') change(()=>f.rotation=(f.rotation+90)%360);
   else if (action==='duplicate') change(()=>{
-    const offset=plan().snap?plan().step:Math.max(f.width,f.depth)*.15;
-    const copy=fixture(f,f.x+offset,f.y+offset,f.rotation);
+    const copy=fixture(f,f.x,f.y,f.rotation);
+    offsetToFreeSpot([copy]);
     plan().fixtures.push(copy);
     selection=copy.id;
   });
@@ -904,17 +1076,21 @@ $('selection-bar').onclick=event=>{
   });
 };
 $('grid-btn').onclick=()=>change(()=>plan().grid=!plan().grid);
-$('snap-btn').onclick=()=>change(()=>plan().snap=!plan().snap);
+$('snap-btn').onclick=()=>change(()=>{
+  plan().snap=!plan().snap;
+  snapGuides={};
+});
 $('snap-size').onchange=event=>change(()=>plan().step=Number(event.target.value));
 $('undo').onclick=()=>history(past,future);
 $('redo').onclick=()=>history(future,past);
 $('fit').onclick=()=>{if (!pointers.size) fitView();};
 $('zoom-in').onclick=()=>centerZoom(1.25);
 $('zoom-out').onclick=()=>centerZoom(.8);
-$('draw-back').onclick=()=>{if (draw) {draw.points.pop();render();}};
+$('draw-back').onclick=()=>{if (draw) {draw.points.pop();snapGuides={};render();}};
 $('draw-close').onclick=closeDraw;
 $('draw-cancel').onclick=()=>{
   if (!draw) return;
+  snapGuides={};
   Object.assign(camera,draw.savedCamera);
   draw=null;
   refresh();

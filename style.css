@@ -111,3 +111,15 @@ dialog::backdrop{background:#16274764}
 }
 @media(max-width:370px){#coordinate{display:none}.brand strong{font-size:12px}.floating .icon{display:none}}
 #rect-fields{margin-top:10px}
+
+.snap-guide { pointer-events: none; }
+.snap-guide path {
+  fill: none;
+  stroke: #e11d48;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+.snap-guide .snap-guide-halo {
+  stroke: #fff;
+  stroke-width: 5;
+}
