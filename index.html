@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f8faff">
+<title>卖场平面图</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232859e9'/%3E%3Cpath d='M7 7h18v18H7zM12 12h8m-8 4h8m-8 4h5' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+<script defer src="app.js"></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="brand-icon" data-icon="layout"></span><strong>卖场平面图<small>布局工作台</small></strong></div>
+  <div class="top-actions">
+    <button id="plans-btn" data-icon="folder">方案</button>
+    <button id="import-btn" data-testid="btn-import-json" data-icon="upload">导入</button>
+    <button id="export-btn" class="primary" data-icon="download">导出</button>
+    <button id="new-btn" class="outline" data-testid="btn-new-venue" data-icon="plus">新建场地</button>
+  </div>
+</header>
+<main>
+  <aside class="library" id="library-panel" aria-label="货架库">
+    <div class="panel-heading"><div><h2>货架库</h2><p>点选货架，添加到平面图</p></div><button id="add-type" data-testid="btn-add-fixture" data-icon="plus" title="新增货架" aria-label="新增货架"></button></div>
+    <div class="library-actions"><button id="add-group" data-icon="plus">新建组合</button><button id="restore-library">恢复默认货架</button></div>
+    <div class="library-scroll" id="library-list"></div>
+    <div class="library-footer"><button id="import-library" data-icon="upload">导入库</button><button id="export-library" data-icon="download">导出库</button></div>
+  </aside>
+  <section class="workspace" aria-label="绘图工作区">
+    <div class="workspace-top">
+      <div class="plan-title"><h1 id="plan-name"></h1><div class="plan-meta"><span id="plan-area"></span><span id="save-status" role="status">已保存到本机</span></div></div>
+      <div class="history"><button id="undo" data-testid="btn-undo" data-icon="undo" aria-label="撤销" title="撤销"></button><button id="redo" data-testid="btn-redo" data-icon="redo" aria-label="重做" title="重做"></button></div>
+    </div>
+    <div id="viewport">
+      <svg id="plan" data-testid="plan-svg" xmlns="http://www.w3.org/2000/svg" aria-label="卖场平面图画布"></svg>
+      <div id="draw-bar" class="floating" hidden><span id="draw-count"></span><button id="draw-back">退一点</button><button id="draw-cancel">取消</button><button id="draw-close" class="primary">闭合图形</button></div>
+      <div id="selection-bar" class="floating" hidden><button data-action="rotate" data-icon="rotate">旋转</button><button data-action="duplicate" data-icon="copy">复制</button><button data-action="delete" data-icon="trash">删除</button><button data-action="properties" data-icon="settings">属性</button></div>
+      <div class="zoom-tools"><button id="zoom-out" aria-label="缩小" data-icon="minus"></button><span id="zoom-value"></span><button id="zoom-in" aria-label="放大" data-icon="plus"></button><button id="fit" data-testid="btn-fit" data-icon="fit" aria-label="适应画布" title="适应画布"></button></div>
+    </div>
+    <div class="workspace-bottom"><button id="library-btn" data-testid="btn-library" data-icon="layout">货架库</button><button id="grid-btn" data-icon="grid" aria-pressed="true">网格</button><button id="snap-btn" data-icon="magnet" aria-pressed="true">吸附</button><label class="snap-size"><select id="snap-size" aria-label="吸附间距"><option>10</option><option>50</option><option selected>100</option><option>500</option></select> mm</label><span id="coordinate">X 0 · Y 0 mm</span></div>
+  </section>
+  <aside id="properties" class="properties" aria-label="属性面板"></aside>
+</main>
+<dialog id="dialog"></dialog>
+<input type="file" id="plan-file" accept=".json,application/json" hidden>
+<input type="file" id="library-file" accept=".json,.csv,application/json,text/csv" hidden>
+<div id="toast" role="status" hidden></div>
+</body>
+</html>
