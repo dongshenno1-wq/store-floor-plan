@@ -191,7 +191,7 @@ function snapPosition(raw,fixture,vertices){
   const p=plan(), result={x:round(raw.x),y:round(raw.y)};
   if (!p.snap) return {position:result,guides:{}};
 
-  const threshold=Math.min(150,Math.max(8,12/camera.scale));
+  const threshold=Math.min(480,Math.max(8,16/camera.scale));
   const extents=fixture ? fixtureExtents(fixture) : {x:0,y:0};
   const offsets=axis=>fixture ? [-extents[axis],extents[axis],0] : [0];
   const matches={};
