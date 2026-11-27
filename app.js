@@ -39,7 +39,7 @@ function rectangle(width,length){
   return [{x:0,y:0},{x:width,y:0},{x:width,y:length},{x:0,y:length}];
 }
 function createPlan(name,points,kind){
-  return {id:uid(),name,points,kind,fixtures:[],grid:true,snap:true,step:100};
+  return {id:uid(),name,points,kind,fixtures:[],grid:true,snap:true,step:100,...(kind==='polygon' ? {showAngles:true} : {})};
 }
 function fixture(type,x,y,rotation=0){
   return {id:uid(),name:type.name,width:type.width,depth:type.depth,color:type.color,x,y,rotation};
@@ -74,6 +74,12 @@ const svg = $('plan');
 const dialog = $('dialog');
 const camera = {x:0,y:0,scale:1,base:1};
 function toast(message){
+  if (dialog.open) {
+    const status=dialog.querySelector('.modal-status');
+    status.textContent=message;
+    status.hidden=false;
+    return;
+  }
   $('toast').textContent = message;
   $('toast').hidden = false;
   clearTimeout(toastTimer);
@@ -116,11 +122,63 @@ function bounds(points){
   const x = points.map(p => p.x), y = points.map(p => p.y);
   return {left:Math.min(...x),top:Math.min(...y),right:Math.max(...x),bottom:Math.max(...y)};
 }
+function signedArea(points){
+  return points.reduce((sum,p,i) => {
+    const next=points[(i+1)%points.length];
+    return sum+p.x*next.y-next.x*p.y;
+  },0)/2;
+}
 function area(points){
-  return Math.abs(points.reduce((sum,p,i) => {
-    const next = points[(i+1)%points.length];
-    return sum+(p.x*next.y-next.x*p.y);
-  },0))/2e6;
+  return Math.abs(signedArea(points))/1e6;
+}
+const radians=degrees=>degrees*Math.PI/180;
+const degrees=angle=>angle*180/Math.PI;
+const wrapAngle=angle=>((angle%360)+360)%360;
+const distance=(a,b)=>Math.hypot(b.x-a.x,b.y-a.y);
+const validLength=length=>Number.isFinite(length) && length>=.001;
+const validAngle=angle=>Number.isFinite(angle) && angle>0 && angle<360;
+function headingFrom(a,b){
+  return wrapAngle(degrees(Math.atan2(b.y-a.y,b.x-a.x)));
+}
+function interiorAngle(points,i,winding=Math.sign(signedArea(points))){
+  const n=points.length;
+  if (n<3) return NaN;
+  const a=points[(i+n-1)%n], b=points[i], c=points[(i+1)%n];
+  if (!winding || !distance(a,b) || !distance(b,c)) return NaN;
+  return wrapAngle(winding*(headingFrom(b,a)-headingFrom(b,c)));
+}
+function validGeometry(points){
+  return points.every((p,i)=>Number.isFinite(p.x) && Number.isFinite(p.y) &&
+    Number.isFinite(distance(p,points[(i+1)%points.length]))) &&
+    Number.isFinite(signedArea(points)) && validPolygon(points);
+}
+function setEdgeLength(points,i,length,fixStart=true){
+  const j=(i+1)%points.length, a=points[i], b=points[j], old=distance(a,b);
+  if (!validLength(length) || !Number.isFinite(old) || !old) return null;
+  const shift=(length-old)/old*(fixStart?1:-1);
+  const dx=(b.x-a.x)*shift, dy=(b.y-a.y)*shift;
+  // The chain wraps around the boundary until it reaches the fixed endpoint.
+  const result=points.map((p,k)=>k===(fixStart?i:j) ? {...p} : {x:p.x+dx,y:p.y+dy});
+  if (points.length===2) return result.every(p=>Number.isFinite(p.x) && Number.isFinite(p.y)) ? result : null;
+  return validGeometry(result) ? result : null;
+}
+function setInteriorAngle(points,i,angle){
+  const winding=Math.sign(signedArea(points)), old=interiorAngle(points,i,winding);
+  if (!validAngle(angle) || !validAngle(old)) return null;
+  const previous=(i+points.length-1)%points.length, pivot=points[i];
+  const turn=radians(winding*(old-angle)), cos=Math.cos(turn), sin=Math.sin(turn);
+  const result=points.map((p,k)=>{
+    if (k===i || k===previous) return {...p};
+    const dx=p.x-pivot.x,dy=p.y-pivot.y;
+    return {x:pivot.x+dx*cos-dy*sin,y:pivot.y+dx*sin+dy*cos};
+  });
+  // A winding flip would make the result's interior angle 360° minus the requested angle.
+  return validGeometry(result) && Math.sign(signedArea(result))===winding ? result : null;
+}
+function nextPointFromLengthAngle(points,length,angle){
+  const last=points.at(-1);
+  const heading=points.length===1 ? angle%360 : headingFrom(points.at(-2),last)+180-angle;
+  return {x:last.x+length*Math.cos(radians(heading)),y:last.y+length*Math.sin(radians(heading))};
 }
 function normalize(points,fixtures=[]){
   const {left,top} = bounds(points);
@@ -300,7 +358,7 @@ function scaleMark(x,y,u){
   const label = length >= 1000 ? number(length/1000)+' m' : number(Math.round(length))+' mm';
   return '<g transform="translate('+x+' '+y+')" fill="#435775"><path d="M0 '+(-5*u)+'V0H'+length+'V'+(-5*u)+'" fill="none" stroke="#435775" stroke-width="'+1.5*u+'"/><text x="'+length/2+'" y="'+(-8*u)+'" text-anchor="middle" font-size="'+12*u+'">'+label+'</text></g>';
 }
-function dimension(a,b,u,side=1,gap=15,rotation=0){
+function dimension(a,b,u,side=1,gap=15,rotation=0,edge){
   const dx=b.x-a.x,dy=b.y-a.y, length=Math.hypot(dx,dy);
   if (!length) return '';
   const offsetX=side*dy/length*u*gap, offsetY=-side*dx/length*u*gap;
@@ -308,7 +366,29 @@ function dimension(a,b,u,side=1,gap=15,rotation=0){
   const orientation=((angle+rotation)%360+360)%360;
   if (orientation>90 && orientation<=270) angle+=180;
   const x=(a.x+b.x)/2+offsetX,y=(a.y+b.y)/2+offsetY;
-  return '<g pointer-events="none"><path d="M'+(a.x+offsetX)+' '+(a.y+offsetY)+'L'+(b.x+offsetX)+' '+(b.y+offsetY)+' M'+a.x+' '+a.y+'l'+offsetX*1.22+' '+offsetY*1.22+' M'+b.x+' '+b.y+'l'+offsetX*1.22+' '+offsetY*1.22+'" fill="none" stroke="#7084a5" stroke-width="'+u+'"/><text transform="translate('+x+' '+y+') rotate('+angle+')" y="'+(-3*u)+'" text-anchor="middle" font-size="'+12*u+'" fill="#425778" stroke="#fff" stroke-width="'+3*u+'" paint-order="stroke">'+number(length)+' mm</text></g>';
+  const label=number(length)+' mm';
+  const hit=edge===undefined ? '' :
+    '<path d="M'+a.x+' '+a.y+'L'+b.x+' '+b.y+'" fill="none" stroke="transparent" stroke-width="'+44*u+'" pointer-events="stroke"/>'+
+    labelHit(x,y,u,label,angle);
+  return '<g '+(edge===undefined?'pointer-events="none"':'data-edge="'+edge+'" data-testid="edge-'+edge+'" pointer-events="none"')+'>'+hit+'<path d="M'+(a.x+offsetX)+' '+(a.y+offsetY)+'L'+(b.x+offsetX)+' '+(b.y+offsetY)+' M'+a.x+' '+a.y+'l'+offsetX*1.22+' '+offsetY*1.22+' M'+b.x+' '+b.y+'l'+offsetX*1.22+' '+offsetY*1.22+'" fill="none" stroke="#7084a5" stroke-width="'+u+'"/><text transform="translate('+x+' '+y+') rotate('+angle+')" y="'+(-3*u)+'" text-anchor="middle" font-size="'+12*u+'" fill="#425778" stroke="#fff" stroke-width="'+3*u+'" paint-order="stroke">'+label+'</text></g>';
+}
+function labelHit(x,y,u,label,angle=0){
+  const halfWidth=Math.max(22,label.length*4+7)*u;
+  return '<rect transform="translate('+x+' '+y+') rotate('+angle+')" x="'+(-halfWidth)+'" y="'+(-22*u)+'" width="'+2*halfWidth+'" height="'+44*u+'" fill="transparent" pointer-events="all"/>';
+}
+function angleMarkup(points,i,u,winding,exporting){
+  const angle=interiorAngle(points,i,winding);
+  if (!validAngle(angle)) return '';
+  const n=points.length,p=points[i],next=points[(i+1)%n],previous=points[(i+n-1)%n];
+  const heading=headingFrom(p,next), r=Math.min(18*u,distance(p,next)*.35,distance(p,previous)*.35);
+  const at=(a,radius)=>({x:p.x+radius*Math.cos(radians(a)),y:p.y+radius*Math.sin(radians(a))});
+  const start=at(heading,r),end=at(heading+winding*angle,r);
+  const {x,y}=at(heading+winding*angle/2,r+15*u);
+  const label=number(angle)+'°';
+  return '<g pointer-events="none"'+(exporting?'':' data-angle="'+i+'" data-testid="angle-'+i+'"')+'>'+
+    '<path d="M'+path([start])+' A'+r+' '+r+' 0 '+(angle>180?1:0)+' '+(winding>0?1:0)+' '+path([end])+'" fill="none" stroke="#2859e9" stroke-width="'+1.4*u+'"/>'+
+    (exporting?'':labelHit(x,y,u,label))+
+    '<text x="'+x+'" y="'+y+'" text-anchor="middle" dominant-baseline="central" font-size="'+12*u+'" fill="#214dbf" stroke="#fff" stroke-width="'+3*u+'" paint-order="stroke">'+label+'</text></g>';
 }
 function contrast(color){
   const rgb = [1,3,5].map(i => parseInt(color.slice(i,i+2),16)/255).map(x => x<=.04045 ? x/12.92 : ((x+.055)/1.055)**2.4);
@@ -354,17 +434,28 @@ function gridMarkup(x,y,w,h,u){
 function planMarkup(p,u,exporting=false){
   const venueSelected=!exporting && selection==='venue';
   const outline='<polygon data-venue="true" points="'+path(p.points)+'" fill="'+(exporting?'#fff':'#ffffffac')+'" stroke="'+(venueSelected?'#2859e9':'#405880')+'" stroke-width="'+2*u+'"/>';
-  const signed = p.points.reduce((sum,a,i) => {
-    const b=p.points[(i+1)%p.points.length];
-    return sum+a.x*b.y-b.x*a.y;
-  },0);
-  const dimensions = (p.kind==='rect'?[0,3]:p.points.map((_,i)=>i)).map(i =>
-    dimension(p.points[i],p.points[(i+1)%p.points.length],u,Math.sign(signed))).join('');
-  const handles = venueSelected && p.kind==='polygon' ? p.points.map((point,i) =>
-    '<circle data-vertex="'+i+'" cx="'+point.x+'" cy="'+point.y+'" r="'+9*u+'" fill="#fff" stroke="#2859e9" stroke-width="'+2*u+'"/>').join('') : '';
-  return outline+dimensions+p.fixtures.map(f => fixtureMarkup(f,u,!exporting && selection===f.id,exporting)).join('')+handles;
+  const polygon=p.kind==='polygon', winding=Math.sign(signedArea(p.points));
+  const dimensions=(polygon?p.points.map((_,i)=>i):[0,3]).map(i =>
+    dimension(p.points[i],p.points[(i+1)%p.points.length],u,winding,15,0,polygon && !exporting ? i : undefined)).join('');
+  const angles=polygon && p.showAngles!==false ? p.points.map((_,i)=>angleMarkup(p.points,i,u,winding,exporting)).join('') : '';
+  const handles=venueSelected && polygon ? p.points.map((point,i) =>
+    '<g data-vertex="'+i+'"><circle cx="'+point.x+'" cy="'+point.y+'" r="'+17*u+'" fill="transparent"/><circle cx="'+point.x+'" cy="'+point.y+'" r="'+8*u+'" fill="#fff" stroke="#2859e9" stroke-width="'+2*u+'"/></g>').join('') : '';
+  return outline+dimensions+p.fixtures.map(f=>fixtureMarkup(f,u,!exporting && selection===f.id,exporting)).join('')+angles+handles;
+}
+function drawPreview(u){
+  const last=draw.points.at(-1), next=draw.preview;
+  $('draw-info').textContent='';
+  if (!last || !next || !validLength(distance(last,next))) return '';
+  const heading=headingFrom(last,next), previous=draw.points.at(-2);
+  const angle=previous ? wrapAngle(headingFrom(last,previous)-heading) : heading;
+  const info=number(distance(last,next))+' mm · '+(previous?'内角 ':'方向 ')+number(angle)+'°';
+  $('draw-info').textContent=info;
+  const x=(last.x+next.x)/2,y=(last.y+next.y)/2-10*u;
+  return '<g pointer-events="none"><path d="M'+path([last])+' L'+path([next])+'" fill="none" stroke="#2859e9" stroke-width="'+1.5*u+'" stroke-dasharray="'+6*u+' '+4*u+'"/>'+
+    '<text data-testid="live-draw-info" x="'+x+'" y="'+y+'" text-anchor="middle" font-size="'+12*u+'" fill="#214dbf" stroke="#fff" stroke-width="'+3*u+'" paint-order="stroke">'+info+'</text></g>';
 }
 function render(){
+  $('draw-bar').hidden = !draw;
   const u=1/camera.scale,w=Math.max(svg.clientWidth,1)*u,h=Math.max(svg.clientHeight,1)*u;
   svg.setAttribute('viewBox',[camera.x,camera.y,w,h].join(' '));
   svg.setAttribute('font-family',svgFont);
@@ -372,6 +463,13 @@ function render(){
   if (draw) {
     scene += '<polyline points="'+path(draw.points)+'" fill="none" stroke="#2859e9" stroke-width="'+2*u+'"/>';
     scene += draw.points.map((point,i) => '<circle data-draw-point="'+i+'" cx="'+point.x+'" cy="'+point.y+'" r="'+8*u+'" fill="'+(i?'#2859e9':'#fff')+'" stroke="#2859e9" stroke-width="'+2*u+'"/>').join('');
+    scene+=drawPreview(u);
+    const hasPoint=draw.points.length>0;
+    $('draw-angle-label').textContent=draw.points.length>1?'内角 °':'方向 °';
+    for (const control of $('draw-bar').querySelectorAll('.draw-controls:first-child input, .draw-controls:first-child button')) {
+      control.disabled=!hasPoint || draw.points.length>=500;
+    }
+    $('draw-back').disabled=!hasPoint;
     $('draw-count').textContent = draw.points.length+' 个顶点';
     $('draw-close').disabled = draw.points.length<3;
   } else {
@@ -379,7 +477,6 @@ function render(){
   }
   svg.innerHTML = scene+guideMarkup(u)+scaleMark(camera.x+15*u,camera.y+h-19*u,u);
   $('selection-bar').hidden = !!draw || !selectedFixture();
-  $('draw-bar').hidden = !draw;
   $('zoom-value').textContent = Math.round(camera.scale/camera.base*100)+'%';
 }
 function selectedFixture(){
@@ -403,7 +500,7 @@ function properties(){
     head('场地信息')+'<div class="property-content"><p class="muted">'+(p.kind==='rect'?'矩形场地':'多边形场地')+'</p><div class="metrics">'+
     metric('场地面积',number(area(p.points))+' m²')+metric('已放货架',p.fixtures.length+' 件')+
     metric('外接宽度',number(b.right-b.left)+' mm')+metric('外接长度',number(b.bottom-b.top)+' mm')+
-    '</div><p class="hint">'+(p.kind==='polygon'?'点击场地可选中轮廓并拖动顶点。':'点击货架后，可拖动调整位置。')+'</p>'+
+    '</div><p class="hint">'+(p.kind==='polygon'?'点击边长可改长度，点击顶点可改内角。选中场地后可拖动顶点。':'点击货架后，可拖动调整位置。')+'</p>'+
     '<button id="select-venue" class="outline">'+(p.kind==='polygon'?'选择场地顶点':'选择场地')+'</button></div>';
   $('properties-close').onclick = () => {
     $('properties').classList.remove('open');
@@ -440,6 +537,8 @@ function refresh(){
   $('plan-area').textContent=number(area(p.points))+' m²';
   $('grid-btn').setAttribute('aria-pressed',p.grid);
   $('snap-btn').setAttribute('aria-pressed',p.snap);
+  $('btn-toggle-angles').hidden=p.kind!=='polygon';
+  $('btn-toggle-angles').setAttribute('aria-pressed',p.kind==='polygon' && p.showAngles!==false);
   $('snap-size').value=p.step;
   $('undo').disabled=!past.length || !!draw;
   $('redo').disabled=!future.length || !!draw;
@@ -448,11 +547,39 @@ function refresh(){
   render();
 }
 function modal(title,body,footer=''){
-  dialog.innerHTML='<div class="modal-head"><h2>'+title+'</h2><button id="modal-close" type="button" aria-label="关闭">'+icon('close')+'</button></div>'+body+footer;
+  dialog.innerHTML='<div class="modal-head"><h2>'+title+'</h2><button id="modal-close" type="button" aria-label="关闭">'+icon('close')+'</button></div>'+body+footer+'<p class="modal-status" role="status" hidden></p>';
   $('modal-close').onclick=()=>dialog.close();
   if (!dialog.open) dialog.showModal();
 }
 const foot=content=>'<div class="modal-foot">'+content+'</div>';
+function geometryEditor(index,edge){
+  const p=plan(), input=edge?'edge-length':'vertex-angle';
+  const value=edge?distance(p.points[index],p.points[(index+1)%p.points.length]):interiorAngle(p.points,index);
+  selection='venue';
+  render();
+  properties();
+  modal(edge?'边长 · mm':'内角 · °','<form id="geometry-form" novalidate><div class="modal-body">'+
+    field(edge?'长度 · mm':'角度 · °',input,value,'type="number" step="any" inputmode="decimal" data-testid="'+input+'"')+
+    (edge?'<fieldset class="edge-anchor"><legend>固定端点</legend><label><input type="radio" name="anchor" id="edge-fix-start" data-testid="edge-fix-start" checked>固定起点</label><label><input type="radio" name="anchor" id="edge-fix-end" data-testid="edge-fix-end">固定终点</label></fieldset>':'')+
+    '</div>'+foot('<button type="button" id="geometry-cancel">取消</button><button class="primary" data-testid="btn-apply-'+(edge?'edge':'angle')+'">应用</button>')+'</form>');
+  $('geometry-cancel').onclick=()=>dialog.close();
+  $('geometry-form').onsubmit=event=>{
+    event.preventDefault();
+    const value=$(input).valueAsNumber;
+    if (edge ? !validLength(value) : !validAngle(value)) {
+      return toast(edge?'请输入至少 0.001 mm 的有限边长':'请输入大于 0° 且小于 360° 的内角');
+    }
+    const points=edge?setEdgeLength(p.points,index,value,$('edge-fix-start').checked):setInteriorAngle(p.points,index,value);
+    if (!points) return toast('调整后场地无效，请检查边线是否过短、重叠或交叉');
+    dialog.close();
+    change(()=>{
+      p.points=points;
+      const {left,top}=normalize(points,p.fixtures);
+      camera.x-=left;
+      camera.y-=top;
+    });
+  };
+}
 const shapes={
   L:[[0,0],[9000,0],[9000,4500],[5000,4500],[5000,9000],[0,9000]],
   T:[[2500,0],[6500,0],[6500,2500],[9000,2500],[9000,7500],[0,7500],[0,2500],[2500,2500]]
@@ -473,18 +600,69 @@ function newVenue(){
   modal('建立新场地','<form id="venue-form"><div class="modal-body"><div class="tabs"><button type="button" id="tab-rect" class="active">矩形</button><button type="button" id="tab-poly" data-testid="tab-polygon">多边形</button></div>'+
     field('场地名称','venue-name','新卖场','maxlength="100" required data-testid="venue-name"')+
     '<div id="rect-fields" class="fields">'+field('宽 · mm','venue-width',9000,positive+' data-testid="venue-width"')+field('长 · mm','venue-length',14000,positive+' data-testid="venue-length"')+'</div>'+
-    '<div id="poly-fields" hidden><p class="hint">按边界顺序输入坐标，或在画布上点选顶点。</p><div class="row-actions"><button type="button" id="shape-l" class="outline">L形</button><button type="button" id="shape-t" class="outline">凸形</button><button type="button" id="draw-start" class="outline">在画布上绘制</button></div><table class="vertex-table"><thead><tr><th>X · mm</th><th>Y · mm</th><th></th></tr></thead><tbody id="vertex-rows"></tbody></table><button type="button" id="add-vertex">'+icon('plus')+'添加顶点</button></div></div>'+
+    '<div id="poly-fields" hidden><p class="hint">按边界顺序输入坐标，或在画布上点选顶点。</p><div class="row-actions"><button type="button" id="shape-l" class="outline">L形</button><button type="button" id="shape-t" class="outline">凸形</button><button type="button" id="draw-start" class="outline">在画布上绘制</button></div><div class="vertex-scroll"><table class="vertex-table"><thead><tr><th>顶点 X</th><th>Y</th><th>边长 mm</th><th>内角 °</th><th></th></tr></thead><tbody id="vertex-rows"></tbody></table></div><button type="button" id="add-vertex">'+icon('plus')+'添加顶点</button></div></div>'+
     foot('<button type="submit" class="primary" data-testid="btn-create-venue">建立场地</button>')+'</form>');
   let kind='rect';
+  const rows=()=>[...$('vertex-rows').rows];
+  const inputs=row=>[...row.querySelectorAll('input')];
+  const coordinates=()=>rows().map(row=>{
+    const [x,y]=inputs(row);
+    return {x:x.valueAsNumber,y:y.valueAsNumber};
+  });
+  function updateMeasures(){
+    const points=coordinates(), n=points.length;
+    const winding=points.every(p=>Number.isFinite(p.x) && Number.isFinite(p.y))?Math.sign(signedArea(points)):0;
+    rows().forEach((row,i)=>{
+      const lengths=i+1<n || n>=3;
+      const length=lengths?distance(points[i],points[(i+1)%n]):NaN;
+      const angle=interiorAngle(points,i,winding);
+      const fields=inputs(row);
+      fields.forEach((input,j)=>input.dataset.testid='vertex-'+['x','y','length','angle'][j]+'-'+i);
+      fields[2].disabled=!Number.isFinite(length) || length<=0;
+      fields[3].disabled=!validAngle(angle);
+      fields[2].value=Number.isFinite(length)?round(length):'';
+      fields[3].value=validAngle(angle)?round(angle):'';
+    });
+  }
+  function editMeasure(row,input,edge){
+    const points=coordinates(), i=row.rowIndex-1;
+    const result=edge?setEdgeLength(points,i,input.valueAsNumber):setInteriorAngle(points,i,input.valueAsNumber);
+    const status=dialog.querySelector('.modal-status');
+    status.hidden=true;
+    if (result) {
+      rows().forEach((row,j)=>{
+        const [x,y]=inputs(row);
+        x.value=result[j].x;
+        y.value=result[j].y;
+      });
+    } else {
+      toast(edge?'请输入至少 0.001 mm 的有效边长，调整后边线不能重叠或交叉':'请输入大于 0° 且小于 360° 的有效内角，调整后边线不能重叠或交叉');
+    }
+    updateMeasures();
+  }
   function appendRow(x='',y=''){
     if ($('vertex-rows').children.length>=500) return toast('最多可添加 500 个顶点');
     const row=$('vertex-rows').insertRow();
-    row.innerHTML='<td><input type="number" step="any" aria-label="顶点 X" value="'+x+'"></td><td><input type="number" step="any" aria-label="顶点 Y" value="'+y+'"></td><td><button type="button" aria-label="移除顶点">'+icon('trash')+'</button></td>';
-    row.querySelector('button').onclick=()=>row.remove();
+    row.innerHTML=['顶点 X','顶点 Y','边长','内角'].map(label=>'<td><input type="number" step="any" inputmode="decimal" aria-label="'+label+'"></td>').join('')+
+      '<td><button type="button" aria-label="移除顶点">'+icon('trash')+'</button></td>';
+    const [xInput,yInput,length,angle]=inputs(row);
+    xInput.value=x;
+    yInput.value=y;
+    xInput.oninput=yInput.oninput=updateMeasures;
+    length.onchange=()=>editMeasure(row,length,true);
+    angle.onchange=()=>editMeasure(row,angle,false);
+    length.onkeydown=angle.onkeydown=event=>{
+      if (event.key==='Enter') {
+        event.preventDefault();
+        event.currentTarget.blur();
+      }
+    };
+    row.querySelector('button').onclick=()=>{row.remove();updateMeasures();};
   }
   function applyShape(shape){
     $('vertex-rows').replaceChildren();
     shape.forEach(([x,y])=>appendRow(x,y));
+    updateMeasures();
   }
   applyShape(shapes.L);
   function tab(next){
@@ -501,27 +679,25 @@ function newVenue(){
   $('tab-poly').onclick=()=>tab('polygon');
   $('shape-l').onclick=()=>applyShape(shapes.L);
   $('shape-t').onclick=()=>applyShape(shapes.T);
-  $('add-vertex').onclick=()=>appendRow();
+  $('add-vertex').onclick=()=>{appendRow();updateMeasures();};
   $('draw-start').onclick=()=>{
     const name=$('venue-name').value.trim();
     if (!name) return toast('请输入场地名称');
+    $('draw-length').value='';
+    $('draw-angle').value='';
     draw={name,points:[],width:9000,length:9000,savedCamera:{...camera}};
     $('library-panel').classList.remove('open');
     $('properties').classList.remove('open');
     dialog.close();
-    fitView();
     refresh();
+    fitView();
     toast('点击画布添加顶点，拖动空白处可平移');
   };
   $('venue-form').onsubmit=event=>{
     event.preventDefault();
     const name=$('venue-name').value.trim();
     if (!name) return toast('请输入场地名称');
-    const points=kind==='rect' ? rectangle($('venue-width').valueAsNumber,$('venue-length').valueAsNumber) :
-      [...$('vertex-rows').rows].map(row=>{
-        const [x,y]=row.querySelectorAll('input');
-        return {x:x.valueAsNumber,y:y.valueAsNumber};
-      });
+    const points=kind==='rect' ? rectangle($('venue-width').valueAsNumber,$('venue-length').valueAsNumber) : coordinates();
     if (!points.every(p=>[p.x,p.y].every(n=>Number.isFinite(n)&&Math.abs(n)<=1e9)) || !validPolygon(points)) return toast('请输入有效坐标，边线不能交叉');
     dialog.close();
     addPlan(name,points,kind);
@@ -712,6 +888,7 @@ function pair(){
   return {mid:{x:(a.x+b.x)/2,y:(a.y+b.y)/2},distance:Math.max(1,Math.hypot(a.x-b.x,a.y-b.y))};
 }
 function startPinch(){
+  if (draw) draw.preview=null;
   const {mid,distance}=pair();
   gesture={kind:'pinch',anchor:world(mid),distance,scale:camera.scale};
   snapGuides={};
@@ -729,12 +906,14 @@ svg.addEventListener('pointerdown',event=>{
   const target=event.target;
   const item=target.closest('[data-item]')?.dataset.item;
   const vertex=target.closest('[data-vertex]')?.dataset.vertex;
+  const edge=target.closest('[data-edge]')?.dataset.edge;
+  const angle=target.closest('[data-angle]')?.dataset.angle;
   const fixture=plan().fixtures.find(f=>f.id===item);
   const node=vertex===undefined ? fixture : plan().points[Number(vertex)];
   gesture={
     kind:draw?'draw':node?'move':'pan', point, start:world(point),
     origin:node?{x:node.x,y:node.y}:{x:camera.x,y:camera.y},
-    vertex, item, node, venue:!!target.closest('[data-venue]'),
+    vertex, edge, angle, item, node, venue:!!target.closest('[data-venue]'),
     first:target.dataset.drawPoint==='0', moved:false
   };
   gestureBefore=null;
@@ -745,15 +924,32 @@ svg.addEventListener('pointerdown',event=>{
     properties();
   }
 });
+function drawTapPoint(raw){
+  const last=draw.points.at(-1);
+  if (!last) return snapPosition(raw,null,[]);
+  const heading=Math.round(headingFrom(last,raw)/15)*15;
+  return {position:nextPointFromLengthAngle([last],distance(last,raw),heading),guides:{}};
+}
+function previewDraw(raw){
+  const {position,guides}=drawTapPoint(raw);
+  draw.preview=position;
+  snapGuides=guides;
+  render();
+}
+function appendDrawPoint(point){
+  if (draw.points.length>=500) return toast('最多可添加 500 个顶点');
+  if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return toast('请输入有效的长度和角度');
+  if (draw.points.some(p=>distance(p,point)<.001)) return toast('新顶点不能与已有顶点重合');
+  draw.points.push(point);
+  draw.preview=null;
+  snapGuides={};
+}
 svg.addEventListener('pointermove',event=>{
   const point=localPoint(event);
   const pos=world(point);
   $('coordinate').textContent='X '+Math.round(pos.x)+' · Y '+Math.round(pos.y)+' mm';
   if (!pointers.has(event.pointerId)) {
-    if (draw && !pointers.size) {
-      snapGuides=snapPosition(pos,null,draw.points).guides;
-      render();
-    }
+    if (draw && !pointers.size) previewDraw(pos);
     return;
   }
   pointers.set(event.pointerId,point);
@@ -763,10 +959,7 @@ svg.addEventListener('pointermove',event=>{
   } else {
     const g=gesture;
     if (!g.moved && Math.hypot(point.x-g.point.x,point.y-g.point.y)<4) {
-      if (g.kind==='draw') {
-        snapGuides=snapPosition(pos,null,draw.points).guides;
-        render();
-      }
+      if (g.kind==='draw') previewDraw(pos);
       return;
     }
     g.moved=true;
@@ -781,6 +974,7 @@ svg.addEventListener('pointermove',event=>{
         edited=true;
       }
     } else {
+      if (draw) draw.preview=null;
       snapGuides={};
       camera.x=g.origin.x-(point.x-g.point.x)/camera.scale;
       camera.y=g.origin.y-(point.y-g.point.y)/camera.scale;
@@ -793,6 +987,7 @@ function closeDraw(){
   const {name,points}=draw;
   snapGuides={};
   draw=null;
+  $('draw-bar').hidden=true;
   addPlan(name,points,'polygon');
 }
 function endPointer(event){
@@ -824,12 +1019,13 @@ function endPointer(event){
     if (draw) {
       if (g.first && draw.points.length>=3) {
         closeDraw();
-      } else if (draw.points.length>=500) {
-        toast('最多可添加 500 个顶点');
       } else {
-        const point=snapPosition(g.start,null,draw.points).position;
-        if (!draw.points.some(p=>p.x===point.x && p.y===point.y)) draw.points.push(point);
+        appendDrawPoint(drawTapPoint(g.start).position);
       }
+    } else if (g.vertex!==undefined || g.angle!==undefined) {
+      geometryEditor(Number(g.vertex??g.angle),false);
+    } else if (g.edge!==undefined) {
+      geometryEditor(Number(g.edge),true);
     } else if (g.kind==='pan') {
       selection=g.venue?'venue':null;
       properties();
@@ -839,7 +1035,8 @@ function endPointer(event){
 }
 ['pointerup','pointercancel','lostpointercapture'].forEach(type=>svg.addEventListener(type,endPointer));
 svg.addEventListener('pointerleave',()=>{
-  if (draw && !pointers.size && Object.keys(snapGuides).length) {
+  if (draw && !pointers.size) {
+    draw.preview=null;
     snapGuides={};
     render();
   }
@@ -967,6 +1164,7 @@ function cleanPlan(entry){
   normalize(points,p.fixtures);
   p.grid=entry.grid!==false;
   p.snap=entry.snap!==false;
+  if (kind==='polygon') p.showAngles=entry.showAngles!==false;
   if ([10,50,100,500].includes(entry.step)) p.step=entry.step;
   return p;
 }
@@ -1075,6 +1273,7 @@ $('selection-bar').onclick=event=>{
     $('properties').classList.remove('open');
   });
 };
+$('btn-toggle-angles').onclick=()=>change(()=>plan().showAngles=plan().showAngles===false);
 $('grid-btn').onclick=()=>change(()=>plan().grid=!plan().grid);
 $('snap-btn').onclick=()=>change(()=>{
   plan().snap=!plan().snap;
@@ -1086,7 +1285,26 @@ $('redo').onclick=()=>history(future,past);
 $('fit').onclick=()=>{if (!pointers.size) fitView();};
 $('zoom-in').onclick=()=>centerZoom(1.25);
 $('zoom-out').onclick=()=>centerZoom(.8);
-$('draw-back').onclick=()=>{if (draw) {draw.points.pop();snapGuides={};render();}};
+for (const button of $('draw-bar').querySelectorAll('[data-quick-angle]')) {
+  button.onclick=()=>$('draw-angle').value=button.dataset.quickAngle;
+}
+$('draw-add').onclick=()=>{
+  if (!draw?.points.length) return;
+  const length=$('draw-length').valueAsNumber, angle=$('draw-angle').valueAsNumber;
+  if (!validLength(length)) return toast('请输入至少 0.001 mm 的有限长度');
+  if (draw.points.length===1 ? !Number.isFinite(angle) : !validAngle(angle)) {
+    return toast(draw.points.length===1?'请输入有效的方向角':'请输入大于 0° 且小于 360° 的内角');
+  }
+  appendDrawPoint(nextPointFromLengthAngle(draw.points,length,angle));
+  render();
+};
+$('draw-back').onclick=()=>{
+  if (!draw) return;
+  draw.points.pop();
+  draw.preview=null;
+  snapGuides={};
+  render();
+};
 $('draw-close').onclick=closeDraw;
 $('draw-cancel').onclick=()=>{
   if (!draw) return;
@@ -1094,6 +1312,7 @@ $('draw-cancel').onclick=()=>{
   Object.assign(camera,draw.savedCamera);
   draw=null;
   refresh();
+  lastSize=svg.clientWidth+'x'+svg.clientHeight;
 };
 document.addEventListener('keydown',event=>{
   if (dialog.open || event.target.matches('input,select,textarea')) return;

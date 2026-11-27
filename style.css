@@ -123,3 +123,19 @@ dialog::backdrop{background:#16274764}
   stroke: #fff;
   stroke-width: 5;
 }
+
+#plan [data-edge],#plan [data-angle]{cursor:pointer}
+#draw-bar{position:static;transform:none;max-width:none;max-height:35%;overflow:auto;display:grid;gap:4px;padding:6px 9px;border-radius:0;box-shadow:none}
+.draw-controls,.draw-quick{display:flex;align-items:center;flex-wrap:wrap;gap:4px}
+.draw-controls label{display:flex;align-items:center;gap:4px;white-space:nowrap}
+.draw-controls input{width:80px}
+.draw-controls #draw-angle-label{padding-left:0}
+#draw-info{color:var(--muted);font-size:12px}
+.vertex-scroll{overflow-x:auto}
+.vertex-table{min-width:370px;table-layout:fixed}
+.vertex-table th:last-child{width:44px}
+.edge-anchor{margin:12px 0 0;border:1px solid var(--line);border-radius:9px;display:flex;flex-wrap:wrap;gap:8px}
+.edge-anchor label{display:flex;align-items:center;gap:6px;padding:0 8px;min-height:44px;cursor:pointer}
+.edge-anchor input{margin:0}
+.modal-status{padding:0 17px 12px;color:#a42929}
+@media(max-width:700px){.workspace-bottom{flex-wrap:wrap}}
